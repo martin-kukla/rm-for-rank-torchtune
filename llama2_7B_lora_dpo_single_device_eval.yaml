@@ -57,9 +57,8 @@ loss:
   label_smoothing: 0
   loss_type: sigmoid
 
-# Training
-epochs: 1
-max_steps_per_epoch: 1000
+# Evalution
+max_eval_steps: 5
 
 # Logging
 output_dir: /tmp/lora_dpo_output/

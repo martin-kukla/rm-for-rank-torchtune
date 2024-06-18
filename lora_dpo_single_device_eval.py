@@ -80,15 +80,9 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.log_every_n_steps if cfg.log_every_n_steps else 1
-        self._log_peak_memory_every_n_steps = 100
 
-        # These are public properties which are updated by the checkpoint loader
-        # when ``resume_from_checkpoint`` is `True` or validated in tests
-        self.seed = utils.set_seed(seed=cfg.seed)
-        self.epochs_run = 0
-        self.total_epochs = cfg.epochs
-        self.max_steps_per_epoch = cfg.max_steps_per_epoch
-        self.total_training_steps = 0
+        self.seed = utils.set_seed(seed=cfg.seed) # TODO XXX XXX: We shouldn't need this
+        self.max_eval_steps = cfg.max_eval_steps
 
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
@@ -103,26 +97,6 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         checkpoint_dict = self._checkpointer.load_checkpoint()
         
         return checkpoint_dict
-
-    def _update_recipe_state(self, ckpt_dict: Dict[str, Any]) -> None:
-        """
-        Updates the recipe state from checkpoint.
-        """
-        # If seed, total_epoch or max_steps_per_epoch don't match,
-        # warn the user and overwrite
-        if (
-            self.seed != ckpt_dict[utils.SEED_KEY]
-            or self.total_epochs != ckpt_dict[utils.TOTAL_EPOCHS_KEY]
-            or self.max_steps_per_epoch != ckpt_dict[utils.MAX_STEPS_KEY]
-        ):
-            warn(
-                message="""Configured value for seed, epochs or max_steps_per_epoch
-                does not match the value stored in checkpoint."""
-            )
-        self.seed = utils.set_seed(seed=ckpt_dict[utils.SEED_KEY])
-        self.epochs_run = ckpt_dict[utils.EPOCHS_KEY]
-        self.total_epochs = ckpt_dict[utils.TOTAL_EPOCHS_KEY]
-        self.max_steps_per_epoch = ckpt_dict[utils.MAX_STEPS_KEY]
 
     def setup(self, cfg: DictConfig) -> None:
         """
@@ -156,23 +130,6 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
             batch_size=cfg.batch_size,
         )
 
-        # Finally update the recipe state which can only be correctly set after all of the
-        # other components have been initialized and updated.
-
-        # Number of training steps in each epoch depends on the number of batches produced
-        # by the dataloader and the max_steps_per_epoch param set by the user and is used
-        # for logging and tracking training state. This should be computed after the dataloader
-        # has been setup
-        self._steps_per_epoch = (
-            len(self._dataloader)
-        )
-        steps_per_epoch = len(self._dataloader)
-        if (
-            self.max_steps_per_epoch is not None
-            and self.max_steps_per_epoch < self._steps_per_epoch
-        ):
-            self._steps_per_epoch = self.max_steps_per_epoch
-            self.total_training_steps = self.epochs_run * self._steps_per_epoch
 
     def _setup_model(
         self,
@@ -329,83 +286,69 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         The core evaluation loop.
         """
 
-        # self.epochs_run should be non-zero when we're resuming from a checkpoint
-        for curr_epoch in range(self.epochs_run, self.total_epochs):
-            # Update the sampler to ensure data is correctly shuffled across epochs
-            # in case shuffle is True
-            self._sampler.set_epoch(curr_epoch)
-            for idx, batch in enumerate(pbar := tqdm(self._dataloader)):
-                if (
-                    self.max_steps_per_epoch is not None
-                    and idx == self.max_steps_per_epoch
-                ):
-                    break
+        # Update the sampler to ensure data is correctly shuffled across epochs
+        # in case shuffle is True
+        self._sampler.set_epoch(0) # TODO XXX XXX: I don't need to shuffle for eval. For now, I test on small portion of dataset which small training run has seen
+        for eval_step, batch in enumerate(pbar := tqdm(self._dataloader)):
+            if (
+                self.max_eval_steps is not None
+                and eval_step == self.max_eval_steps
+            ):
+                break
 
-                with torch.no_grad():
+            with torch.no_grad():
+                (
+                    policy_chosen_log_probs,
+                    policy_rejected_log_probs,
+                    policy_chosen_logits,
+                    policy_rejected_logits,
+                ) = self.concatenated_forward(self._model, batch)
+
+                with disable_adapter(self._model):
                     (
-                        policy_chosen_log_probs,
-                        policy_rejected_log_probs,
-                        policy_chosen_logits,
-                        policy_rejected_logits,
-                    ) = self.concatenated_forward(self._model, batch)
-
-                    with disable_adapter(self._model):
-                        (
-                            reference_chosen_log_probs,
-                            reference_rejected_log_probs,
-                            _,
-                            _,
-                        ) = self.concatenated_forward(self._model, batch)
-
-                    loss, chosen_rewards, rejected_rewards = self._loss_fn(
-                        policy_chosen_log_probs,
-                        policy_rejected_log_probs,
                         reference_chosen_log_probs,
                         reference_rejected_log_probs,
-                    )
-                    loss = loss.mean()
-                    reward_accuracies = (chosen_rewards > rejected_rewards).float()
-        
-                    # TODO XXX: Debugging
-                    #print(f'loss {loss} reward_accuracies {reward_accuracies} policy_chosen_log_probs {policy_chosen_log_probs} reference_chosen_log_probs {reference_chosen_log_probs} batch {batch}')
-                
-                if self.total_training_steps % self._log_every_n_steps == 0:
-                    pbar.set_description(f"{curr_epoch+1}|{idx+1}|Loss: {loss.item()}")
-                    self._metric_logger.log_dict(
-                        {
-                            "loss": loss.item(),
-                            "rewards/chosen": chosen_rewards.mean().cpu(),
-                            "rewards/rejected": rejected_rewards.mean().cpu(),
-                            "rewards/accuracies": reward_accuracies.mean().cpu(),
-                            "rewards/margins": (chosen_rewards - rejected_rewards)
-                            .mean()
-                            .cpu(),
-                            "log_probs/rejected": policy_rejected_log_probs.detach()
-                            .mean()
-                            .cpu(),
-                            "log_probs/chosen": policy_chosen_log_probs.detach()
-                            .mean()
-                            .cpu(),
-                            "logits/rejected": policy_rejected_logits.detach()
-                            .mean()
-                            .cpu(),
-                            "logits/chosen": policy_chosen_logits.detach().mean().cpu(),
-                            "gpu_resources": torch.cuda.memory_allocated(),
-                        },
-                        step=self.total_training_steps,  # Each step is unique, not limited to each epoch
-                    )
-                self.total_training_steps += 1
-                # Log peak memory for iteration
-                if (
-                    self.total_training_steps % self._log_peak_memory_every_n_steps == 0
-                    and self._device == torch.device("cuda")
-                ):
-                    # Log peak memory for iteration
-                    memory_stats = utils.memory_stats_log(device=self._device)
-                    self._metric_logger.log_dict(
-                        memory_stats, step=self.total_training_steps
-                    )
-            self.epochs_run += 1
+                        _,
+                        _,
+                    ) = self.concatenated_forward(self._model, batch)
+
+                loss, chosen_rewards, rejected_rewards = self._loss_fn(
+                    policy_chosen_log_probs,
+                    policy_rejected_log_probs,
+                    reference_chosen_log_probs,
+                    reference_rejected_log_probs,
+                )
+                loss = loss.mean()
+                reward_accuracies = (chosen_rewards > rejected_rewards).float()
+    
+                # TODO XXX: Debugging
+                #print(f'loss {loss} reward_accuracies {reward_accuracies} policy_chosen_log_probs {policy_chosen_log_probs} reference_chosen_log_probs {reference_chosen_log_probs} batch {batch}')
+            
+            if eval_step % self._log_every_n_steps == 0:
+                pbar.set_description(f"{eval_step+1}|Loss: {loss.item()}")
+                self._metric_logger.log_dict(
+                    {
+                        "loss": loss.item(),
+                        "rewards/chosen": chosen_rewards.mean().cpu(),
+                        "rewards/rejected": rejected_rewards.mean().cpu(),
+                        "rewards/accuracies": reward_accuracies.mean().cpu(),
+                        "rewards/margins": (chosen_rewards - rejected_rewards)
+                        .mean()
+                        .cpu(),
+                        "log_probs/rejected": policy_rejected_log_probs.detach()
+                        .mean()
+                        .cpu(),
+                        "log_probs/chosen": policy_chosen_log_probs.detach()
+                        .mean()
+                        .cpu(),
+                        "logits/rejected": policy_rejected_logits.detach()
+                        .mean()
+                        .cpu(),
+                        "logits/chosen": policy_chosen_logits.detach().mean().cpu(),
+                        "gpu_resources": torch.cuda.memory_allocated(),
+                    },
+                    step=eval_step,
+                )
 
     def cleanup(self) -> None:
         self._metric_logger.close()
