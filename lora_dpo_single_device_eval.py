@@ -90,7 +90,6 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         self.max_steps_per_epoch = cfg.max_steps_per_epoch
         self.total_training_steps = 0
 
-        self._resume_from_checkpoint = cfg.resume_from_checkpoint
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
@@ -100,18 +99,9 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         """
         self._checkpointer = config.instantiate(
             cfg_checkpointer,
-            resume_from_checkpoint=self._resume_from_checkpoint,
         )
         checkpoint_dict = self._checkpointer.load_checkpoint()
-
-        if self._resume_from_checkpoint:
-            if utils.ADAPTER_KEY not in checkpoint_dict:
-                raise ValueError(
-                    "Adapter weights not found. Please ensure a valid adapter checkpoint is provided."
-                )
-            # _update_recipe_state will throw an exception if the recipe state is not correctly loaded
-            # no need to check here
-            self._update_recipe_state(checkpoint_dict)
+        
         return checkpoint_dict
 
     def _update_recipe_state(self, ckpt_dict: Dict[str, Any]) -> None:
@@ -149,11 +139,7 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         self._model = self._setup_model(
             cfg_model=cfg.model,
             base_model_state_dict=checkpoint_dict[utils.MODEL_KEY],
-            lora_weights_state_dict=(
-                checkpoint_dict[utils.ADAPTER_KEY]
-                if self._resume_from_checkpoint
-                else None
-            ),
+            lora_weights_state_dict = (checkpoint_dict[utils.ADAPTER_KEY]),
         )
 
         self._tokenizer = config.instantiate(cfg.tokenizer)
@@ -340,7 +326,7 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
 
     def evaluate(self) -> None:
         """
-        The core training loop.
+        The core evaluation loop.
         """
 
         # self.epochs_run should be non-zero when we're resuming from a checkpoint

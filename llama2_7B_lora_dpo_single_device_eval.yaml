@@ -30,20 +30,18 @@ tokenizer:
   _component_: torchtune.models.llama2.llama2_tokenizer
   path: /tmp/Llama-2-7b-hf/tokenizer.model
 
+# Model
+# Note we load base model and adapter seperately, since we need reference and policy models
 checkpointer:
   _component_: torchtune.utils.FullModelHFCheckpointer
   checkpoint_dir: /tmp/Llama-2-7b-hf
   checkpoint_files: [
-    hf_model_0001_0.pt,
-    hf_model_0002_0.pt
-    #pytorch_model-00001-of-00002.bin,
-    #pytorch_model-00002-of-00002.bin
+    pytorch_model-00001-of-00002.bin,
+    pytorch_model-00002-of-00002.bin
   ]
-  adapter_checkpoint: adapter_0.pt #null
-  recipe_checkpoint: null #null
+  adapter_checkpoint: adapter_0.pt
   output_dir: /tmp/Llama-2-7b-hf
   model_type: LLAMA2
-resume_from_checkpoint: False #True # False
 
 # Dataset and Sampler
 dataset:
