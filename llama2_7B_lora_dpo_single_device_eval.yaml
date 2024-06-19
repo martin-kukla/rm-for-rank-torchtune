@@ -47,6 +47,7 @@ checkpointer:
 dataset:
   _component_: torchtune.datasets.stack_exchanged_paired_dataset
   max_seq_len: 1024
+  data_dir: "data/evaluation"
 seed: null
 shuffle: False # TODO XXX: change to True to much training script, and overfit more easily?
 batch_size: 16

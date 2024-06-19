@@ -1,5 +1,6 @@
 #! /bin/bash
-pip install torchtune
+#pip install torchtune
+pip install -e ../torchtune
 pip install bitsandbytes
 pip install wandb
 
