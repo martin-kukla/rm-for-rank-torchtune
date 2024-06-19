@@ -79,7 +79,6 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
             raise RuntimeError("Full bf16 training is not supported on this hardware.")
         # logging attributes
         self._output_dir = cfg.output_dir
-        self._log_every_n_steps = cfg.log_every_n_steps if cfg.log_every_n_steps else 1
 
         self.seed = utils.set_seed(seed=cfg.seed) # TODO XXX XXX: We shouldn't need this
         self.max_eval_steps = cfg.max_eval_steps
@@ -285,6 +284,7 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         """
         The core evaluation loop.
         """
+        steps_metrics = []
 
         # Update the sampler to ensure data is correctly shuffled across epochs
         # in case shuffle is True
@@ -324,31 +324,38 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
                 # TODO XXX: Debugging
                 #print(f'loss {loss} reward_accuracies {reward_accuracies} policy_chosen_log_probs {policy_chosen_log_probs} reference_chosen_log_probs {reference_chosen_log_probs} batch {batch}')
             
-            if eval_step % self._log_every_n_steps == 0:
-                pbar.set_description(f"{eval_step+1}|Loss: {loss.item()}")
-                self._metric_logger.log_dict(
-                    {
-                        "loss": loss.item(),
-                        "rewards/chosen": chosen_rewards.mean().cpu(),
-                        "rewards/rejected": rejected_rewards.mean().cpu(),
-                        "rewards/accuracies": reward_accuracies.mean().cpu(),
-                        "rewards/margins": (chosen_rewards - rejected_rewards)
-                        .mean()
-                        .cpu(),
-                        "log_probs/rejected": policy_rejected_log_probs.detach()
-                        .mean()
-                        .cpu(),
-                        "log_probs/chosen": policy_chosen_log_probs.detach()
-                        .mean()
-                        .cpu(),
-                        "logits/rejected": policy_rejected_logits.detach()
-                        .mean()
-                        .cpu(),
-                        "logits/chosen": policy_chosen_logits.detach().mean().cpu(),
-                        "gpu_resources": torch.cuda.memory_allocated(),
-                    },
-                    step=eval_step,
-                )
+            pbar.set_description(f"{eval_step+1}|Loss: {loss.item()}")
+            self._metric_logger.log_dict(
+                {
+                    "loss": loss.item(),
+                    "rewards/chosen": chosen_rewards.mean().cpu(),
+                    "rewards/rejected": rejected_rewards.mean().cpu(),
+                    "rewards/accuracies": reward_accuracies.mean().cpu(),
+                    "rewards/margins": (chosen_rewards - rejected_rewards)
+                    .mean()
+                    .cpu(),
+                    "log_probs/rejected": policy_rejected_log_probs.detach()
+                    .mean()
+                    .cpu(),
+                    "log_probs/chosen": policy_chosen_log_probs.detach()
+                    .mean()
+                    .cpu(),
+                    "logits/rejected": policy_rejected_logits.detach()
+                    .mean()
+                    .cpu(),
+                    "logits/chosen": policy_chosen_logits.detach().mean().cpu(),
+                },
+                step=eval_step,
+            )
+            steps_metrics.append((loss.item(), chosen_rewards.mean().cpu(), rejected_rewards.mean().cpu(), reward_accuracies.mean().cpu(), (chosen_rewards - rejected_rewards).mean().cpu()))
+
+        # Aggregated evaluation metrics
+        steps_metrics = list(zip(*steps_metrics))
+        metrics_names = ["Loss", "Chosen rewards", "Rejected reward", "Reward accuracies", "Margins"]
+        print(f'Steps metrics: {steps_metrics}')
+        my_mean = lambda x: sum(x)/len(x)
+        for m_name, m_numbers in zip(metrics_names, steps_metrics):
+            print(f'{m_name}: {my_mean(m_numbers)}')
 
     def cleanup(self) -> None:
         self._metric_logger.close()

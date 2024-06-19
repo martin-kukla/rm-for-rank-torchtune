@@ -28,19 +28,19 @@ model:
 # Tokenizer
 tokenizer:
   _component_: torchtune.models.llama2.llama2_tokenizer
-  path: /tmp/Llama-2-7b-hf/tokenizer.model
+  path: Llama-2-7b-hf/tokenizer.model
 
 # Model
 # Note we load base model and adapter seperately, since we need reference and policy models
 checkpointer:
   _component_: torchtune.utils.FullModelHFCheckpointer
-  checkpoint_dir: /tmp/Llama-2-7b-hf
+  checkpoint_dir: Llama-2-7b-hf
   checkpoint_files: [
     pytorch_model-00001-of-00002.bin,
     pytorch_model-00002-of-00002.bin
   ]
-  adapter_checkpoint: adapter_0.pt
-  output_dir: /tmp/Llama-2-7b-hf
+  adapter_checkpoint: adapter_0_baseline.pt
+  output_dir: /tmp/Llama-2-7b-hf # it will not be used
   model_type: LLAMA2
 
 # Dataset and Sampler
@@ -58,14 +58,13 @@ loss:
   loss_type: sigmoid
 
 # Evalution
-max_eval_steps: 5
+max_eval_steps: 40
 
 # Logging
 output_dir: /tmp/lora_dpo_output/
 metric_logger:
   _component_: torchtune.utils.metric_logging.DiskLogger
   log_dir: ${output_dir}
-log_every_n_steps: 1
 
 # Environment
 device: cuda
