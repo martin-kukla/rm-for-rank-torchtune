@@ -30,21 +30,9 @@ from torchtune.recipe_interfaces import FTRecipeInterface
 from tqdm import tqdm
 
 # DDP
-import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
-
-def ddp_setup(rank: int, world_size: int): # TODO: this probably can't be removed except torch.cuda.set_device(rank)? CHeck it
-   """
-   Args:
-       rank: Unique identifier of each process
-      world_size: Total number of processes
-   """
-   os.environ["MASTER_ADDR"] = "localhost"
-   os.environ["MASTER_PORT"] = "12355"
-   torch.cuda.set_device(rank)
-   init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 log = utils.get_logger("DEBUG")
 
@@ -96,6 +84,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
             )
 
         _, rank = utils.get_world_size_and_rank()
+        log.info(f"The model's rank is {rank}")
         self._model_rank = rank
         self._is_rank_zero = rank == 0
         
@@ -210,7 +199,8 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
         )
 
         self._tokenizer = config.instantiate(cfg.tokenizer)
-        log.info("Tokenizer is initialized from file.")
+        if self._is_rank_zero:
+            log.info("Tokenizer is initialized from file.")
 
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
@@ -220,7 +210,8 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
         )
 
         self._loss_fn = config.instantiate(cfg.loss)
-        log.info("Loss is initialized.")
+        if self._is_rank_zero:
+            log.info("Loss is initialized.")
 
         # Dataloader depends on the tokenizer and loss_fn and should be
         # setup after all of these are setup
@@ -262,7 +253,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
         base_model_state_dict: Dict[str, Any],
         lora_weights_state_dict: Optional[Dict[str, Any]] = None,
     ) -> nn.Module:
-        with utils.set_default_dtype(self._dtype), self._device: # TODO: plug write device here
+        with utils.set_default_dtype(self._dtype), self._device:
             model = config.instantiate(cfg_model)
         self._lora_rank = cfg_model.lora_rank
         self._lora_alpha = cfg_model.lora_alpha
@@ -500,7 +491,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
             logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)
         ).squeeze(2)
 
-        return torch.nanmean(per_token_log_probs * loss_mask, dim=-1)
+        return (per_token_log_probs * loss_mask).sum(-1) / loss_mask.sum(-1)
 
     def train(self) -> None:
         """
@@ -535,7 +526,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
                     rejected_logits,
                 ) = self.concatenated_forward(self._model, batch)
 
-                loss, chosen_rewards, rejected_rewards, or_loss, log_odds_chosen, log_odds_rejected = self._loss_fn(
+                loss, chosen_rewards, rejected_rewards, nll_loss_chosen, or_loss, log_odds_chosen, log_odds_rejected = self._loss_fn(
                     avg_chosen_log_probs,
                     avg_rejected_log_probs,
                 )
@@ -583,6 +574,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
                             .mean()
                             .cpu(),
                             "logits/chosen": chosen_logits.detach().mean().cpu(),
+                            "orpo/nll_loss_chosen": nll_loss_chosen.detach().mean().cpu(),
                             "orpo/or_loss": or_loss.detach().mean().cpu(),
                             "orpo/log_odds_chosen": log_odds_chosen.detach().mean().cpu(),
                             "orpo/log_odds_rejected": log_odds_rejected.detach().mean().cpu(),
