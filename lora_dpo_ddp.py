@@ -29,17 +29,13 @@ from torchtune.modules.peft.peft_utils import (
 from torchtune.recipe_interfaces import FTRecipeInterface
 from tqdm import tqdm
 
-# DDP
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
-import os
-
 log = utils.get_logger("DEBUG")
 
-class LoRAORPORecipeDDP(FTRecipeInterface):
+
+class LoRADPORecipeDDP(FTRecipeInterface):
     """
-    LoRA ORPO recipe for dense transformer-based LLMs such as Llama2 for
-    distributed training using DDP. This is based on HF's DPOTrainer in the
+    LoRA DPO recipe for dense transformer-based LLMs such as Llama2 for
+    single device training. This is based on HF's DPOTrainer in the
     TRL library: https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py#L65
 
     This recipe supports:
@@ -82,7 +78,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
             raise ValueError(
                 "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
             )
-
+            
         _, rank = utils.get_world_size_and_rank()
         log.info(f"The model's rank is {rank}")
         self._model_rank = rank
@@ -178,10 +174,9 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
         Setup the recipe state. This includes recipe state (if resume_from_checkpoint is True),
         model, tokenizer, loss, optimizer, learning rate scheduler, sampler, and dataloader.
         """
-
         if self._is_rank_zero:
             self._metric_logger = config.instantiate(cfg.metric_logger)
-    
+
             # log config with parameter override
             self._metric_logger.log_config(cfg)
 
@@ -291,11 +286,9 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
 
         if self._is_rank_zero:
             log.info(f"Model is initialized with precision {self._dtype}.")
-            if self._device == torch.device("cuda"):
-                    memory_stats = utils.get_memory_stats(device=self._device)
-                    utils.log_memory_stats(memory_stats)
-
-        model = DDP(model, device_ids=[self._model_rank])
+            if self._device == torch.device("cuda"): 
+                memory_stats = utils.get_memory_stats(device=self._device)
+            utils.log_memory_stats(memory_stats)
         return model
 
     def _setup_optimizer(
@@ -321,7 +314,6 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
             num_training_steps=num_training_steps,
             last_epoch=last_epoch,
         )
-
         if self._is_rank_zero:
             log.info("Learning rate scheduler is initialized.")
         return lr_scheduler
@@ -382,8 +374,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
         different checkpoint files. To correctly resume from training, the adapter weights
         and recipe state must be provided along with the base model weights.
         """
-
-        if self._is_rank_zero:           
+        if self._is_rank_zero:
             ckpt_dict = {}
             # if training is in-progress, checkpoint the optimizer state as well
             if epoch + 1 < self.total_epochs:
@@ -442,7 +433,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
 
         all_logits = model(concatenated_input_ids)
 
-        all_log_probs = self.get_batch_avg_log_probs(all_logits, concatenated_labels)
+        all_log_probs = self.get_batch_log_probs(all_logits, concatenated_labels)
 
         chosen_log_probs = all_log_probs[:len_chosen]
         rejected_log_probs = all_log_probs[len_chosen:]
@@ -453,13 +444,13 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
         return (chosen_log_probs, rejected_log_probs, chosen_logits, rejected_logits)
 
     @staticmethod
-    def get_batch_avg_log_probs(
+    def get_batch_log_probs(
         logits: torch.FloatTensor,
         labels: torch.LongTensor,
         label_pad_token_id: int = CROSS_ENTROPY_IGNORE_IDX,
     ) -> torch.FloatTensor:
         """
-        Calculate average log probabilities based on provided logits and labels.
+        Calculate log probabilities based on provided logits and labels.
 
         Args:
             logits (torch.FloatTensor): direct logits output of the model of shape (b, s, v)
@@ -468,7 +459,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
             label_pad_token_id (int): token id to ignore in labels.
 
         Returns:
-            Calculated average log probs of shape (b, )
+            Calculated log probs of shape (b, )
 
         Raises:
             ValueError: If logits and labels have different shapes.
@@ -489,7 +480,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
             logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)
         ).squeeze(2)
 
-        return (per_token_log_probs * loss_mask).sum(-1) / loss_mask.sum(-1)
+        return (per_token_log_probs * loss_mask).sum(-1)
 
     def train(self) -> None:
         """
@@ -518,15 +509,25 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
                 # batch is input_ids, labels
                 num_tokens += batch[0].numel()
                 (
-                    avg_chosen_log_probs,
-                    avg_rejected_log_probs,
-                    chosen_logits,
-                    rejected_logits,
+                    policy_chosen_log_probs,
+                    policy_rejected_log_probs,
+                    policy_chosen_logits,
+                    policy_rejected_logits,
                 ) = self.concatenated_forward(self._model, batch)
 
-                loss, chosen_rewards, rejected_rewards, nll_loss_chosen, or_loss, log_odds_chosen, log_odds_rejected = self._loss_fn(
-                    avg_chosen_log_probs,
-                    avg_rejected_log_probs,
+                with torch.no_grad(), disable_adapter(self._model):
+                    (
+                        reference_chosen_log_probs,
+                        reference_rejected_log_probs,
+                        _,
+                        _,
+                    ) = self.concatenated_forward(self._model, batch)
+
+                loss, chosen_rewards, rejected_rewards = self._loss_fn(
+                    policy_chosen_log_probs,
+                    policy_rejected_log_probs,
+                    reference_chosen_log_probs,
+                    reference_rejected_log_probs,
                 )
                 loss = loss.mean()
                 reward_accuracies = (chosen_rewards > rejected_rewards).float()
@@ -562,20 +563,16 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
                             "rewards/margins": (chosen_rewards - rejected_rewards)
                             .mean()
                             .cpu(),
-                            "avg_log_probs/rejected": avg_rejected_log_probs.detach()
+                            "log_probs/rejected": policy_rejected_log_probs.detach()
                             .mean()
                             .cpu(),
-                            "avg_log_probs/chosen": avg_chosen_log_probs.detach()
+                            "log_probs/chosen": policy_chosen_log_probs.detach()
                             .mean()
                             .cpu(),
-                            "logits/rejected": rejected_logits.detach()
+                            "logits/rejected": policy_rejected_logits.detach()
                             .mean()
                             .cpu(),
-                            "logits/chosen": chosen_logits.detach().mean().cpu(),
-                            "orpo/nll_loss_chosen": nll_loss_chosen.detach().mean().cpu(),
-                            "orpo/or_loss": or_loss.detach().mean().cpu(),
-                            "orpo/log_odds_chosen": log_odds_chosen.detach().mean().cpu(),
-                            "orpo/log_odds_rejected": log_odds_rejected.detach().mean().cpu(),
+                            "logits/chosen": policy_chosen_logits.detach().mean().cpu(),
                         }
                         if self._log_peak_memory_stats:
                             log_dict.update(utils.get_memory_stats(device=self._device))
@@ -614,9 +611,9 @@ def recipe_main(cfg: DictConfig) -> None:
         )
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
     init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
-
-    config.log_config(recipe_name="LoRAORPORecipeDDP", cfg=cfg)
-    recipe = LoRAORPORecipeDDP(cfg=cfg)
+    
+    config.log_config(recipe_name="LoRADPORecipeDDP", cfg=cfg)
+    recipe = LoRADPORecipeDDP(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
     recipe.cleanup()
