@@ -291,7 +291,7 @@ class LoRAORPORecipeDDP(FTRecipeInterface):
 
         if self._is_rank_zero:
             log.info(f"Model is initialized with precision {self._dtype}.")
-            if self._device == torch.device("cuda"):
+            if self._device == torch.device("cuda"): # TODO: account for different devices
                     memory_stats = utils.get_memory_stats(device=self._device)
                     utils.log_memory_stats(memory_stats)
 

@@ -29,6 +29,11 @@ from torchtune.modules.peft.peft_utils import (
 from torchtune.recipe_interfaces import FTRecipeInterface
 from tqdm import tqdm
 
+#DPO
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+import os
+
 log = utils.get_logger("DEBUG")
 
 
@@ -286,9 +291,9 @@ class LoRADPORecipeDDP(FTRecipeInterface):
 
         if self._is_rank_zero:
             log.info(f"Model is initialized with precision {self._dtype}.")
-            if self._device == torch.device("cuda"): 
+            if self._device == torch.device("cuda"): # TODO: account for different devices
                 memory_stats = utils.get_memory_stats(device=self._device)
-            utils.log_memory_stats(memory_stats)
+                utils.log_memory_stats(memory_stats)
         return model
 
     def _setup_optimizer(
