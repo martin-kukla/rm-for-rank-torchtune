@@ -86,7 +86,7 @@ class LoRADPORecipeDDP(FTRecipeInterface):
             
         _, rank = utils.get_world_size_and_rank()
         log.info(f"The model's rank is {rank}")
-        self._model_rank = rank
+        self._model_rank = rank # TODO: we can just use _device instead I believe
         self._is_rank_zero = rank == 0
         
         # For CUDA devices, check if the HW supports bf16 if bf16 is specified.
@@ -260,11 +260,6 @@ class LoRADPORecipeDDP(FTRecipeInterface):
         self.adapter_params = get_adapter_params(model)
         set_trainable_params(model, self.adapter_params)
 
-        if enable_activation_checkpointing:
-            utils.set_activation_checkpointing(
-                model, auto_wrap_policy={modules.TransformerDecoderLayer}
-            )
-
         validate_state_dict_for_lora(
             lora_attn_modules=cfg_model.lora_attn_modules,
             apply_lora_to_mlp=cfg_model.apply_lora_to_mlp,
@@ -288,12 +283,24 @@ class LoRADPORecipeDDP(FTRecipeInterface):
         utils.validate_expected_param_dtype(
             self.adapter_params.items(), dtype=self._dtype
         )
+        
+        model = DDP(model, device_ids=[self._model_rank])
+        
+        if enable_activation_checkpointing:
+            utils.set_activation_checkpointing(
+                model, auto_wrap_policy={modules.TransformerDecoderLayer}
+            )
 
         if self._is_rank_zero:
             log.info(f"Model is initialized with precision {self._dtype}.")
             if self._device == torch.device("cuda"): # TODO: account for different devices
                 memory_stats = utils.get_memory_stats(device=self._device)
                 utils.log_memory_stats(memory_stats)
+          
+        # TODO: I don't think we need this in multi-device single node setup?
+        # synchronize before training begins
+        #torch.distributed.barrier()
+        
         return model
 
     def _setup_optimizer(
