@@ -401,7 +401,7 @@ class LoRADPORecipeDDP(FTRecipeInterface):
                 )
 
             # Move to CPU to avoid a copy on GPU
-            state_dict = {k: v.cpu() for k, v in self._model.state_dict().items()}
+            state_dict = {k: v.cpu() for k, v in self._model.module.state_dict().items()}
 
             # Construct the full state dict with LoRA weights merged into base LLM weights
             merged_state_dict = get_merged_lora_ckpt(
@@ -414,7 +414,7 @@ class LoRADPORecipeDDP(FTRecipeInterface):
             # Construct the adapter weights
             adapter_key_filter = lambda x: x in self.adapter_params
             adapter_state_dict = {
-                k: v for k, v in self._model.state_dict().items() if adapter_key_filter(k)
+                k: v for k, v in self._model.module.state_dict().items() if adapter_key_filter(k)
             }
             ckpt_dict.update({utils.ADAPTER_KEY: adapter_state_dict})
             self._checkpointer.save_checkpoint(
