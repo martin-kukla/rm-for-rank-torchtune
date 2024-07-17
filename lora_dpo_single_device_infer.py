@@ -30,7 +30,7 @@ from tqdm import tqdm
 log = utils.get_logger("DEBUG")
 
 
-class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
+class LoRADPORecipeSingleDeviceInfer(EvalRecipeInterface):
     """
     LoRA DPO recipe for dense transformer-based LLMs such as Llama2 for
     single device training. This is based on HF's DPOTrainer in the
@@ -285,10 +285,11 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
         The core evaluation loop.
         """
         steps_metrics = []
+        dataset_rewards = []
 
         # Update the sampler to ensure data is correctly shuffled across epochs
         # in case shuffle is True
-        self._sampler.set_epoch(0) # TODO XXX XXX: I don't need to shuffle for eval. For now, I test on small portion of dataset which small training run has seen
+        #self._sampler.set_epoch(0) # TODO XXX XXX: I don't need to shuffle for eval. For now, I test on small portion of dataset which small training run has seen
         for eval_step, batch in enumerate(pbar := tqdm(self._dataloader)):
             if (
                 self.max_eval_steps is not None
@@ -312,50 +313,46 @@ class LoRADPORecipeSingleDeviceEval(EvalRecipeInterface):
                         _,
                     ) = self.concatenated_forward(self._model, batch)
 
-                loss, chosen_rewards, rejected_rewards = self._loss_fn(
-                    policy_chosen_log_probs,
-                    policy_rejected_log_probs,
-                    reference_chosen_log_probs,
-                    reference_rejected_log_probs,
+                # Only compute rewards without calling loss function
+                chosen_rewards = (
+                    self._loss_fn.beta * (policy_chosen_log_probs - reference_chosen_log_probs).detach()
                 )
-                loss = loss.mean()
+                rejected_rewards = (
+                    self._loss_fn.beta * (policy_rejected_log_probs - reference_rejected_log_probs).detach()
+                )
+                
+                batch_rewards = [(ch_r.item(), r_r.item()) for ch_r, r_r in zip(chosen_rewards, rejected_rewards)]
+                dataset_rewards.extend(batch_rewards)
+                
                 reward_accuracies = (chosen_rewards > rejected_rewards).float()
     
-                # TODO XXX: Debugging
-                #print(f'loss {loss} reward_accuracies {reward_accuracies} policy_chosen_log_probs {policy_chosen_log_probs} reference_chosen_log_probs {reference_chosen_log_probs} batch {batch}')
-            
-            pbar.set_description(f"{eval_step+1}|Loss: {loss.item()}")
             self._metric_logger.log_dict(
                 {
-                    "loss": loss.item(),
                     "rewards/chosen": chosen_rewards.mean().cpu(),
                     "rewards/rejected": rejected_rewards.mean().cpu(),
                     "rewards/accuracies": reward_accuracies.mean().cpu(),
                     "rewards/margins": (chosen_rewards - rejected_rewards)
                     .mean()
                     .cpu(),
-                    "log_probs/rejected": policy_rejected_log_probs.detach()
-                    .mean()
-                    .cpu(),
-                    "log_probs/chosen": policy_chosen_log_probs.detach()
-                    .mean()
-                    .cpu(),
-                    "logits/rejected": policy_rejected_logits.detach()
-                    .mean()
-                    .cpu(),
-                    "logits/chosen": policy_chosen_logits.detach().mean().cpu(),
                 },
                 step=eval_step,
             )
-            steps_metrics.append((loss.item(), chosen_rewards.mean().cpu(), rejected_rewards.mean().cpu(), reward_accuracies.mean().cpu(), (chosen_rewards - rejected_rewards).mean().cpu()))
-
+            steps_metrics.append((chosen_rewards.mean().cpu(), rejected_rewards.mean().cpu(), reward_accuracies.mean().cpu(), (chosen_rewards - rejected_rewards).mean().cpu()))
+        
         # Aggregated evaluation metrics
         steps_metrics = list(zip(*steps_metrics))
-        metrics_names = ["Loss", "Chosen rewards", "Rejected reward", "Reward accuracies", "Margins"]
+        metrics_names = ["Chosen rewards", "Rejected reward", "Reward accuracies", "Margins"]
         print(f'Steps metrics: {steps_metrics}')
         my_mean = lambda x: sum(x)/len(x)
         for m_name, m_numbers in zip(metrics_names, steps_metrics):
             print(f'{m_name}: {my_mean(m_numbers)}')
+            
+        # Serialize rewards for dataset
+        rewards_filename = f'{self._output_dir}dataset_rewards.csv'
+        print(f'\nSerializing rewards for {len(dataset_rewards)} datapoints to {rewards_filename}')
+        import pandas as pd
+        df = pd.DataFrame(dataset_rewards, columns=['chosen_reward', 'rejected_reward'])
+        df.to_csv(rewards_filename, index=False)
 
     def cleanup(self) -> None:
         self._metric_logger.close()
@@ -370,8 +367,8 @@ def recipe_main(cfg: DictConfig) -> None:
         - Parameters specified in config (see available configs through ``tune ls``)
         - Overwritten by arguments from the command-line
     """
-    config.log_config(recipe_name="LoRADPORecipeSingleDeviceEval", cfg=cfg)
-    recipe = LoRADPORecipeSingleDeviceEval(cfg=cfg)
+    config.log_config(recipe_name="LoRADPORecipeSingleDeviceInfer", cfg=cfg)
+    recipe = LoRADPORecipeSingleDeviceInfer(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.evaluate()
     recipe.cleanup()
