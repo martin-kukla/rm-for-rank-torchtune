@@ -59,7 +59,7 @@ loss:
   loss_type: sigmoid
 
 # Evalution
-max_eval_steps: 40
+max_eval_steps: 50
 
 # Logging
 output_dir: /tmp/lora_dpo_output/
